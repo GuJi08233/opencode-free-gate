@@ -10,8 +10,6 @@ services:
     environment:
       # 监听端口（默认 13339）
       - PORT=13339
-      # 上游 API Key（客户端未传 Authorization 时使用，默认 public）
-      - KEY=public
       # ZenProxy 备用中继（可选，池子耗尽时降级使用）
       # - ZENPROXY_KEY=你的密钥
       # - ZENPROXY_RELAY=https://zenproxy.top/api/relay

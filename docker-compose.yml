@@ -8,31 +8,16 @@ services:
     ports:
       - "13339:13339"
     environment:
-      # 监听端口（默认 13339）
       - PORT=13339
-      # ZenProxy 备用中继（可选，池子耗尽时降级使用）
+      # ZenProxy 备用中继（可选，全部代理失败时降级使用）
       # - ZENPROXY_KEY=你的密钥
       # - ZENPROXY_RELAY=https://zenproxy.top/api/relay
       # 强制走 relay 模式（调试用，1=开启）
       # - FORCE_RELAY=0
-      # 活跃池大小（同时维持多少个出口 IP）
-      # - POOL_SIZE=10
-      # 单代理最大并发数
-      # - MAX_CONCURRENT_PER_PROXY=3
-      # 连续失败多少次后将该代理退役
-      # - PROXY_FAILURE_THRESHOLD=3
-      # 新代理探活超时（ms）
+      # 探活超时（ms）
       # - PROXY_PROBE_TIMEOUT=8000
-      # 探活路径
-      # - PROXY_PROBE_PATH=/v1/models
       # 候选池刷新间隔（ms，5 分钟）
       # - PROXY_REFRESH_MS=300000
-      # 黑名单过期时间（ms，10 分钟）
-      # - BLACKLIST_TTL=600000
-      # 单代理软溢出上限（全部饱和时允许的最大并发）
-      # - SOFT_OVERFLOW_MAX=6
-      # 并行探活数（同时探测多少个候选代理）
-      # - PROBE_CONCURRENCY=5
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:13339/openai/v1/models"]
       interval: 30s

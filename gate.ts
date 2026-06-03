@@ -34,6 +34,7 @@ const TIMEOUT = 120000;
 const ZENPROXY_RELAY = process.env.ZENPROXY_RELAY || 'https://zenproxy.top/api/relay';
 const ZENPROXY_KEY = process.env.ZENPROXY_KEY || '';
 const FORCE_RELAY = process.env.FORCE_RELAY === '1';   // 调试用：跳过代理池直接走 relay
+const API_KEY = process.env.KEY || 'public';           // 上游 API Key（默认 public）
 
 let pool: ProxyItem[] = [];
 let cursor = 0;
@@ -114,7 +115,7 @@ function collectHeaders(req: Request): Record<string, string> {
     const v = req.headers.get(k);
     if (v) h[k] = v;
   }
-  if (!h['authorization']) h['authorization'] = 'Bearer public';
+  if (!h['authorization']) h['authorization'] = `Bearer ${API_KEY}`;
   if (!h['x-opencode-client']) h['x-opencode-client'] = 'cli';
   if (!h['content-type']) h['content-type'] = 'application/json';
   return h;

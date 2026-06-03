@@ -90,16 +90,16 @@ docker compose up -d
 
 | 客户端 | 设置 |
 |---|---|
-| Python OpenAI SDK | `client = OpenAI(base_url="http://localhost:13339/openai/v1", api_key="public")` |
-| curl | `curl http://localhost:13339/openai/v1/chat/completions -H 'Authorization: Bearer public' -d '...'` |
+| Python OpenAI SDK | `client = OpenAI(base_url="http://localhost:13339/openai/v1", api_key="你的KEY")` |
+| curl | `curl http://localhost:13339/openai/v1/chat/completions -H 'Authorization: Bearer 你的KEY' -d '...'` |
 | 任何 OpenAI 兼容客户端 | `base_url = http://localhost:13339/openai/v1` |
 
 ### Anthropic 格式
 
 | 客户端 | 设置 |
 |---|---|
-| Python Anthropic SDK | `client = Anthropic(base_url="http://localhost:13339/anthropic", api_key="public")` |
-| curl | `curl http://localhost:13339/anthropic/v1/messages -H 'Authorization: Bearer public' -d '...'` |
+| Python Anthropic SDK | `client = Anthropic(base_url="http://localhost:13339/anthropic", api_key="你的KEY")` |
+| curl | `curl http://localhost:13339/anthropic/v1/messages -H 'Authorization: Bearer 你的KEY' -d '...'` |
 | 任何 Anthropic 兼容客户端 | `base_url = http://localhost:13339/anthropic` |
 
 ### 查看可用模型
@@ -167,6 +167,7 @@ docker restart opencode-gate
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `PORT` | `13339` | 监听端口 |
+| `KEY` | `public` | 上游 API Key（客户端未传 Authorization 时使用） |
 | `ZENPROXY_KEY` | 空 | 启用 ZenProxy 备用通道（[申请 Key](https://zenproxy.top)） |
 | `ZENPROXY_RELAY` | `https://zenproxy.top/api/relay` | 自定义 relay 端点 |
 | `FORCE_RELAY` | `0` | 设为 `1` 跳过代理池强制走 ZenProxy（调试用） |

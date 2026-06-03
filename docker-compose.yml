@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  opencode-free-gate:
+    image: ghcr.io/guji08233/opencode-free-gate:latest
+    container_name: opencode-free-gate
+    restart: unless-stopped
+    ports:
+      - "13339:13339"
+    environment:
+      # 监听端口（默认 13339）
+      - PORT=13339
+      # ZenProxy 备用中继（可选，池子耗尽时降级使用）
+      # - ZENPROXY_KEY=你的密钥
+      # - ZENPROXY_RELAY=https://zenproxy.top/api/relay
+      # 强制走 relay 模式（调试用，1=开启）
+      # - FORCE_RELAY=0
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:13339/openai/v1/models"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s

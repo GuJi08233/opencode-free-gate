@@ -374,29 +374,28 @@ function doHttps(
   });
 }
 
-/** 流式请求 — 返回 ReadableStream 给 Bun Response */
+/** 流式请求 — 返回 ReadableStream 给 Bun Response，通过回调跟踪状态 */
 function doHttpsStream(
   path: string,
   method: string,
   headers: Record<string, string>,
   body: string | undefined,
   agent: https.Agent,
+  onDone?: () => void,
+  onError?: (err: Error) => void,
 ): Promise<{ status: number; stream: ReadableStream<Uint8Array> }> {
   return new Promise((resolve, reject) => {
     const req = https.request(
       `${UPSTREAM}${path}`,
       { method, headers, agent, timeout: STREAM_TIMEOUT, rejectUnauthorized: false },
       (res) => {
-        // 流结束/出错时释放 agent（避免原代码的 agent 泄漏）
         res.on('end', () => {
-          try {
-            agent.destroy();
-          } catch {}
+          onDone?.();
+          try { agent.destroy(); } catch {}
         });
-        res.on('error', () => {
-          try {
-            agent.destroy();
-          } catch {}
+        res.on('error', (err) => {
+          onError?.(err);
+          try { agent.destroy(); } catch {}
         });
         const stream = new ReadableStream<Uint8Array>({
           start(controller) {
@@ -411,50 +410,12 @@ function doHttpsStream(
         resolve({ status: res.statusCode || 200, stream });
       },
     );
-    req.on('error', reject);
+    req.on('error', (err) => {
+      onError?.(err);
+      reject(err);
+    });
     if (body) req.write(body);
     req.end();
-  });
-}
-
-/** 给流式响应包一层：错误/取消时给代理记一笔，流结束时释放 busy */
-function wrapStreamWithPenalty(stream: ReadableStream<Uint8Array>, addr: string, onRelease: () => void): ReadableStream<Uint8Array> {
-  let released = false;
-  const safeRelease = () => { if (!released) { released = true; onRelease(); } };
-  let penalized = false;
-  const safePenalize = (reason: string) => { if (!penalized) { penalized = true; penalize(addr, reason); } };
-  let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
-  return new ReadableStream<Uint8Array>({
-    async start(controller) {
-      reader = stream.getReader();
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) {
-            controller.close();
-            safeRelease();
-            return;
-          }
-          controller.enqueue(value);
-        }
-      } catch (e: any) {
-        safePenalize(`stream-error: ${e.message ?? e}`);
-        safeRelease();
-        controller.error(e);
-      } finally {
-        try {
-          reader?.releaseLock();
-        } catch {}
-      }
-    },
-    cancel(reason) {
-      safePenalize(`client-cancel: ${reason ?? ''}`);
-      safeRelease();
-      try {
-        // 通过 reader 取代 stream.cancel()，避免 locked stream 报错
-        reader?.cancel(reason);
-      } catch {}
-    },
   });
 }
 
@@ -504,9 +465,12 @@ async function dispatch(
 
   try {
     if (isStream) {
-      // 流式：在流结束/错误时释放 proxy busy，而非立即释放
-      const { stream } = await doHttpsStream(path, method, headers, body, agent);
-      return new Response(wrapStreamWithPenalty(stream, p.addr, () => releaseProxy(p)), {
+      // 流式：直接返回原始 stream，通过回调跟踪状态
+      const { stream } = await doHttpsStream(path, method, headers, body, agent,
+        () => { p.totalSuccesses++; p.consecutiveFailures = 0; releaseProxy(p); },
+        (err) => { releaseProxy(p); penalize(p.addr, `stream-error: ${err.message}`); },
+      );
+      return new Response(stream, {
         status: 200,
         headers: {
           'content-type': 'text/event-stream; charset=utf-8',

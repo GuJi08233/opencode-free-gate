@@ -60,7 +60,6 @@ const POOL_LOW_THRESHOLD = parseInt(process.env.POOL_LOW_THRESHOLD || '3'); // �
 const ZENPROXY_RELAY = process.env.ZENPROXY_RELAY || 'https://zenproxy.top/api/relay';
 const ZENPROXY_KEY = process.env.ZENPROXY_KEY || '';
 const FORCE_RELAY = process.env.FORCE_RELAY === '1';   // 调试用：跳过代理池直接走 relay
-const API_KEY = process.env.KEY || 'public';           // 上游 API Key（默认 public）
 
 // –– 全局状态 ––
 let candidates: ProxyItem[] = [];
@@ -160,7 +159,7 @@ async function probe(
         `${UPSTREAM}${PROXY_PROBE_PATH}`,
         {
           method: 'GET',
-          headers: { accept: 'application/json', authorization: `Bearer ${API_KEY}` },
+          headers: { accept: 'application/json', authorization: 'Bearer public' },
           agent,
           rejectUnauthorized: false,
         },
@@ -339,11 +338,11 @@ function retire(addr: string): void {
 function collectHeaders(req: Request): Record<string, string> {
   const h: Record<string, string> = {};
   for (const k of FORWARD) {
-    if (k === 'authorization') continue; // authorization 始终由 KEY 决定
+    if (k === 'authorization') continue; // authorization 始终用 public
     const v = req.headers.get(k);
     if (v) h[k] = v;
   }
-  h['authorization'] = `Bearer ${API_KEY}`;
+  h['authorization'] = 'Bearer public';
   if (!h['x-opencode-client']) h['x-opencode-client'] = 'cli';
   if (!h['content-type']) h['content-type'] = 'application/json';
   return h;
@@ -572,14 +571,7 @@ async function proxyViaRelay(
   const clean: Record<string, string> = { ...headers };
   delete clean['host'];
   delete clean['content-length'];
-
-  // KEY 为默认值 public 时剥离 Authorization（避免占位符被拒绝）
-  // KEY 为自定义值时用环境变量覆盖（保留有效 Key）
-  if (API_KEY === 'public') {
-    delete clean['authorization'];
-  } else {
-    clean['authorization'] = `Bearer ${API_KEY}`;
-  }
+  delete clean['authorization']; // 始终剥离，由 relay 端处理鉴权
 
   const target = `${UPSTREAM}${path}`;
   const url =

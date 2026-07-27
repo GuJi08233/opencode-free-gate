@@ -640,6 +640,58 @@ async function proxyViaRelay(
 }
 
 // ––––––––––––––––––––––––––––––––––––––––––––––––––––
+//  模型过滤与重定向
+// ––––––––––––––––––––––––––––––––––––––––––––––––––––
+
+// 上游 -free 模型 → 用户看到的模型名（去掉 -free 后缀）
+const MODEL_RENAME: Record<string, string> = {
+  'deepseek-v4-flash-free': 'deepseek-v4-flash',
+  'mimo-v2.5-free': 'mimo-v2.5',
+  'ling-3.0-flash-free': 'ling-3.0-flash',
+  'nemotron-3-ultra-free': 'nemotron-3-ultra',
+  'north-mini-code-free': 'north-mini-code',
+  'laguna-s-2.1-free': 'laguna-s-2.1',
+};
+
+// 反向映射：用户模型名 → 上游模型名（加回 -free）
+const MODEL_REDIRECT: Record<string, string> = Object.fromEntries(
+  Object.entries(MODEL_RENAME).map(([upstream, display]) => [display, upstream]),
+);
+
+// 额外直接放行的模型（不做重命名）
+const EXTRA_MODELS = ['big-pickle'];
+
+// 所有允许的用户模型名
+const ALLOWED_MODELS = new Set([...Object.keys(MODEL_REDIRECT), ...EXTRA_MODELS]);
+
+/** 拦截 GET /v1/models，返回过滤+重命名后的模型列表 */
+function handleModelsList(): Response {
+  const models = Object.values(MODEL_RENAME).concat(EXTRA_MODELS).sort().map((id) => ({
+    id,
+    object: 'model',
+    created: Math.floor(Date.now() / 1000),
+    owned_by: 'opencode',
+  }));
+  return new Response(JSON.stringify({ object: 'list', data: models }), {
+    headers: { 'content-type': 'application/json; charset=utf-8' },
+  });
+}
+
+/** 将请求体中的模型名重定向为上游实际模型名 */
+function rewriteModel(body: string): string {
+  try {
+    const json = JSON.parse(body);
+    if (json.model && MODEL_REDIRECT[json.model]) {
+      const original = json.model;
+      json.model = MODEL_REDIRECT[original];
+      console.log(`[模型重定向] ${original} → ${json.model}`);
+      return JSON.stringify(json);
+    }
+  } catch {}
+  return body;
+}
+
+// ––––––––––––––––––––––––––––––––––––––––––––––––––––
 //  路由
 // ––––––––––––––––––––––––––––––––––––––––––––––––––––
 
@@ -656,6 +708,7 @@ console.log(`[门] http://localhost:${PORT}`);
 console.log(`[门] OpenAI:    /openai/v1/chat/completions | /openai/v1/models`);
 console.log(`[门] Anthropic: /anthropic/v1/messages`);
 console.log(`[门] 模式:      ${PROXY_MODE}`);
+console.log(`[门] 模型:      ${Object.values(MODEL_RENAME).concat(EXTRA_MODELS).join(', ')}`);
 if (PROXY_MODE === 'auto') {
   console.log(`[门] 策略:      S级代理(${SLOT_COUNT}槽,重试${SLOT_RETRIES}次) → ${ZENPROXY_KEY ? `ZenProxy(${ZENPROXY_RETRIES}次) → ` : ''}自定义代理${CUSTOM_PROXIES ? `(${parseCustomProxies(CUSTOM_PROXIES).length}个,重试${CUSTOM_RETRIES || '按数量'}次)` : '(未配置)'}`);
 } else {
@@ -695,7 +748,8 @@ Bun.serve({
 
     let response: Response;
     if (pathname === '/v1/models' && method === 'GET') {
-      response = await dispatch(pathname + search, 'GET', collectHeaders(req), undefined, 0, new Set<string>(), reqLog);
+      // 本地返回过滤+重命名后的模型列表，不走上游
+      response = handleModelsList();
     } else if ((pathname === '/v1/chat/completions' || pathname === '/v1/messages') && method === 'POST') {
       let body = await req.text();
       const h = collectHeaders(req);
@@ -709,6 +763,8 @@ Bun.serve({
           if (!json.stream) { json.stream = true; body = JSON.stringify(json); }
         } catch {}
       }
+      // 模型名重定向（deepseek-v4-flash → deepseek-v4-flash-free）
+      body = rewriteModel(body);
       response = await dispatch(pathname, 'POST', h, body, 0, new Set<string>(), reqLog);
     } else {
       return new Response('{"error":"not found"}', { status: 404, headers: { 'content-type': 'application/json' } });

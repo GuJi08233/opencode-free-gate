@@ -173,8 +173,10 @@ docker restart opencode-gate
 |---|---|---|
 | `PORT` | `13339` | 监听端口 |
 | `PROXY_MODE` | `auto` | 代理模式：`auto`（自动代理池）或 `custom`（仅自定义代理） |
-| `MAX_RETRIES` | `3` | 最大重试次数（失败后重试同一个代理的次数） |
 | `SLOT_COUNT` | `3` | S级代理槽位数（范围 3-5，仅 auto 模式） |
+| `SLOT_RETRIES` | `SLOT_COUNT` | S级代理重试次数（默认=槽位数，每个槽位试一次） |
+| `CUSTOM_RETRIES` | `0` | 自定义代理重试次数（0=按代理数量轮询） |
+| `ZENPROXY_RETRIES` | `1` | ZenProxy 重试次数 |
 | `CUSTOM_PROXIES` | 空 | 自定义代理列表，逗号分隔（custom 模式必填，auto 模式可选兜底） |
 | `ZENPROXY_KEY` | 空 | 启用 ZenProxy 备用通道（[申请 Key](https://zenproxy.top)） |
 | `ZENPROXY_RELAY` | `https://zenproxy.top/api/relay` | 自定义 relay 端点 |
@@ -186,33 +188,33 @@ docker restart opencode-gate
 
 #### auto 模式（默认）
 
-从公共代理池自动获取 S 级代理，多 IP 轮换使用：
+从公共代理池自动获取 S 级代理，按槽位轮换：
 
 ```
-S级免费代理（3-5个槽位轮换）
-    ↓ 失败重试3次
-ZenProxy（需配置 ZENPROXY_KEY）
+S级代理（SLOT_RETRIES 次，每次换一个槽位）
+    ↓ 全部失败
+ZenProxy（ZENPROXY_RETRIES 次，需配置 ZENPROXY_KEY）
     ↓ 未配置或失败
-自定义代理兜底（需配置 CUSTOM_PROXIES）
+自定义代理（CUSTOM_RETRIES 次，按序轮询不拉黑）
+    ↓ 全部失败
+直连上游
 ```
-
-**优先级**：S级代理 → ZenProxy（可选） → 自定义代理（兜底）
 
 #### custom 模式
 
-仅使用自定义代理，不连接公共代理池：
+仅使用自定义代理，按序轮询不拉黑：
 
 ```bash
-# 使用 custom 模式
-PROXY_MODE=custom CUSTOM_PROXIES=http://1.2.3.4:8080,socks5://5.6.7.8:1080 bun run gate.ts
+# 使用 custom 模式，自定义代理轮询 10 次
+PROXY_MODE=custom CUSTOM_PROXIES=http://1.2.3.4:8080 CUSTOM_RETRIES=10 bun run gate.ts
 ```
 
 ```
-自定义代理（HTTP/SOCKS5）
-    ↓ 失败重试3次
-ZenProxy（需配置 ZENPROXY_KEY）
+自定义代理（CUSTOM_RETRIES 次，按序轮询）
+    ↓ 全部失败
+ZenProxy（ZENPROXY_RETRIES 次，需配置 ZENPROXY_KEY）
     ↓ 未配置或失败
-返回错误
+直连上游
 ```
 
 ---

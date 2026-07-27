@@ -28,6 +28,16 @@ interface Slot {
   proto: 'http' | 'socks5';
 }
 
+interface RequestLog {
+  path: string;
+  method: string;
+  startTime: number;
+  retryCount: number;
+  proxiesTried: Set<string>;
+  finalProxy: string | null;
+  finalStatus: number | null;
+}
+
 const PROXY_API = 'https://proxy.amux.ai/api/proxies';
 const UPSTREAM = 'https://opencode.ai/zen';
 const PORT = parseInt(process.env.PORT || '13339');
@@ -341,7 +351,7 @@ function doHttpsStream(
 /** auto 模式：S级代理(SLOT_RETRIES) → ZenProxy(ZENPROXY_RETRIES) → 自定义代理(CUSTOM_RETRIES) */
 async function dispatchAuto(
   path: string, method: string, headers: Record<string, string>,
-  body: string | undefined, retry = 0, triedAddrs = new Set<string>(),
+  body: string | undefined, retry = 0, triedAddrs = new Set<string>(), reqLog?: RequestLog,
 ): Promise<Response> {
   if (FORCE_RELAY) {
     if (ZENPROXY_KEY) return dispatchZenProxy(path, method, headers, body);
@@ -357,16 +367,20 @@ async function dispatchAuto(
   if (!slot || retry >= SLOT_RETRIES) {
     if (ZENPROXY_KEY) {
       console.log(`[回退] S级代理(${retry}/${SLOT_RETRIES}) → ZenProxy`);
-      return dispatchZenProxy(path, method, headers, body);
+      return dispatchZenProxy(path, method, headers, body, 0, reqLog);
     }
     if (customSlots.length > 0) {
       console.log(`[回退] S级代理(${retry}/${SLOT_RETRIES}) → 自定义代理`);
-      return dispatchViaCustom(path, method, headers, body);
+      return dispatchViaCustom(path, method, headers, body, 0, reqLog);
     }
     return new Response('{"error":"没有可用代理"}', { status: 502, headers: { 'content-type': 'application/json' } });
   }
 
   triedAddrs.add(slot.addr);
+  if (reqLog) {
+    reqLog.proxiesTried.add(slot.addr);
+    reqLog.retryCount = retry;
+  }
   console.log(`[S级] ${slot.addr} (${retry + 1}/${SLOT_RETRIES})`);
 
   const isStream = (headers['accept'] || '').includes('event-stream');
@@ -380,7 +394,11 @@ async function dispatchAuto(
         if (s === 429) console.log(`[429] ${slot.addr} 被限流`);
         else console.log(`[错码] ${slot.addr} 状态码 ${s}`);
         dropSlot(slot.addr);
-        return dispatchAuto(path, method, headers, body, retry + 1, triedAddrs);
+        return dispatchAuto(path, method, headers, body, retry + 1, triedAddrs, reqLog);
+      }
+      if (reqLog) {
+        reqLog.finalProxy = slot.addr;
+        reqLog.finalStatus = s;
       }
       return new Response(stream, {
         status: 200,
@@ -395,15 +413,19 @@ async function dispatchAuto(
       if (status === 429) console.log(`[429] ${slot.addr} 被限流`);
       else console.log(`[错码] ${slot.addr} 状态码 ${status}`);
       dropSlot(slot.addr);
-      return dispatchAuto(path, method, headers, body, retry + 1, triedAddrs);
+      return dispatchAuto(path, method, headers, body, retry + 1, triedAddrs, reqLog);
     }
 
+    if (reqLog) {
+      reqLog.finalProxy = slot.addr;
+      reqLog.finalStatus = status;
+    }
     return new Response(respBody, { status, headers: { 'content-type': 'application/json; charset=utf-8' } });
   } catch (e: any) {
     console.error(`[错] ${slot.addr}: ${e.message}`);
     try { agent.destroy(); } catch {}
     dropSlot(slot.addr);
-    return dispatchAuto(path, method, headers, body, retry + 1, triedAddrs);
+    return dispatchAuto(path, method, headers, body, retry + 1, triedAddrs, reqLog);
   }
 }
 
@@ -414,7 +436,7 @@ async function dispatchAuto(
 /** custom 模式：仅使用自定义代理 → ZenProxy → 直连（自定义代理不标记失败，按序轮询） */
 async function dispatchCustom(
   path: string, method: string, headers: Record<string, string>,
-  body: string | undefined, retry = 0,
+  body: string | undefined, retry = 0, reqLog?: RequestLog,
 ): Promise<Response> {
   if (FORCE_RELAY) {
     if (ZENPROXY_KEY) return dispatchZenProxy(path, method, headers, body);
@@ -426,7 +448,7 @@ async function dispatchCustom(
   if (customSlots.length === 0 || retry >= maxRetries) {
     if (ZENPROXY_KEY) {
       console.log(`[回退] 自定义代理(${retry}/${maxRetries}) → ZenProxy`);
-      return dispatchZenProxy(path, method, headers, body);
+      return dispatchZenProxy(path, method, headers, body, 0, reqLog);
     }
     return new Response('{"error":"没有可用代理"}', { status: 502, headers: { 'content-type': 'application/json' } });
   }
@@ -434,6 +456,10 @@ async function dispatchCustom(
   const slot = customSlots[rrCursor % customSlots.length];
   rrCursor = (rrCursor + 1) % customSlots.length;
 
+  if (reqLog) {
+    reqLog.proxiesTried.add(slot.addr);
+    reqLog.retryCount = retry;
+  }
   console.log(`[自定义] ${slot.addr} (${retry + 1}/${maxRetries})`);
 
   const isStream = (headers['accept'] || '').includes('event-stream');
@@ -446,7 +472,11 @@ async function dispatchCustom(
         try { agent.destroy(); } catch {}
         if (s === 429) console.log(`[429] ${slot.addr} 被限流`);
         else console.log(`[错码] ${slot.addr} 状态码 ${s}`);
-        return dispatchCustom(path, method, headers, body, retry + 1);
+        return dispatchCustom(path, method, headers, body, retry + 1, reqLog);
+      }
+      if (reqLog) {
+        reqLog.finalProxy = slot.addr;
+        reqLog.finalStatus = s;
       }
       return new Response(stream, {
         status: 200,
@@ -460,14 +490,18 @@ async function dispatchCustom(
     if (status >= 400) {
       if (status === 429) console.log(`[429] ${slot.addr} 被限流`);
       else console.log(`[错码] ${slot.addr} 状态码 ${status}`);
-      return dispatchCustom(path, method, headers, body, retry + 1);
+      return dispatchCustom(path, method, headers, body, retry + 1, reqLog);
     }
 
+    if (reqLog) {
+      reqLog.finalProxy = slot.addr;
+      reqLog.finalStatus = status;
+    }
     return new Response(respBody, { status, headers: { 'content-type': 'application/json; charset=utf-8' } });
   } catch (e: any) {
     console.error(`[错] ${slot.addr}: ${e.message}`);
     try { agent.destroy(); } catch {}
-    return dispatchCustom(path, method, headers, body, retry + 1);
+    return dispatchCustom(path, method, headers, body, retry + 1, reqLog);
   }
 }
 
@@ -477,12 +511,12 @@ async function dispatchCustom(
 
 function dispatch(
   path: string, method: string, headers: Record<string, string>,
-  body: string | undefined, retry = 0, triedAddrs = new Set<string>(),
+  body: string | undefined, retry = 0, triedAddrs = new Set<string>(), reqLog?: RequestLog,
 ): Promise<Response> {
   if (PROXY_MODE === 'custom') {
-    return dispatchCustom(path, method, headers, body, retry);
+    return dispatchCustom(path, method, headers, body, retry, reqLog);
   }
-  return dispatchAuto(path, method, headers, body, retry, triedAddrs);
+  return dispatchAuto(path, method, headers, body, retry, triedAddrs, reqLog);
 }
 
 // ––––––––––––––––––––––––––––––––––––––––––––––––––––
@@ -492,7 +526,7 @@ function dispatch(
 /** auto模式兜底：自定义代理按序轮询，不拉黑 */
 async function dispatchViaCustom(
   path: string, method: string, headers: Record<string, string>,
-  body: string | undefined, retry = 0,
+  body: string | undefined, retry = 0, reqLog?: RequestLog,
 ): Promise<Response> {
   const maxRetries = CUSTOM_RETRIES > 0 ? CUSTOM_RETRIES : customSlots.length;
 
@@ -503,6 +537,10 @@ async function dispatchViaCustom(
   const slot = customSlots[rrCursor % customSlots.length];
   rrCursor = (rrCursor + 1) % customSlots.length;
 
+  if (reqLog) {
+    reqLog.proxiesTried.add(slot.addr);
+    reqLog.retryCount = retry;
+  }
   console.log(`[自定义] ${slot.addr} (${retry + 1}/${maxRetries})`);
 
   const isStream = (headers['accept'] || '').includes('event-stream');
@@ -515,7 +553,11 @@ async function dispatchViaCustom(
         try { agent.destroy(); } catch {}
         if (s === 429) console.log(`[429] ${slot.addr} 被限流`);
         else console.log(`[错码] ${slot.addr} 状态码 ${s}`);
-        return dispatchViaCustom(path, method, headers, body, retry + 1);
+        return dispatchViaCustom(path, method, headers, body, retry + 1, reqLog);
+      }
+      if (reqLog) {
+        reqLog.finalProxy = slot.addr;
+        reqLog.finalStatus = s;
       }
       return new Response(stream, {
         status: 200,
@@ -529,14 +571,18 @@ async function dispatchViaCustom(
     if (status >= 400) {
       if (status === 429) console.log(`[429] ${slot.addr} 被限流`);
       else console.log(`[错码] ${slot.addr} 状态码 ${status}`);
-      return dispatchViaCustom(path, method, headers, body, retry + 1);
+      return dispatchViaCustom(path, method, headers, body, retry + 1, reqLog);
     }
 
+    if (reqLog) {
+      reqLog.finalProxy = slot.addr;
+      reqLog.finalStatus = status;
+    }
     return new Response(respBody, { status, headers: { 'content-type': 'application/json; charset=utf-8' } });
   } catch (e: any) {
     console.error(`[错] ${slot.addr}: ${e.message}`);
     try { agent.destroy(); } catch {}
-    return dispatchViaCustom(path, method, headers, body, retry + 1);
+    return dispatchViaCustom(path, method, headers, body, retry + 1, reqLog);
   }
 }
 
@@ -547,21 +593,29 @@ async function dispatchViaCustom(
 /** ZenProxy 重试 ZENPROXY_RETRIES 次 */
 async function dispatchZenProxy(
   path: string, method: string, headers: Record<string, string>,
-  body: string | undefined, retry = 0,
+  body: string | undefined, retry = 0, reqLog?: RequestLog,
 ): Promise<Response> {
   console.log(`[ZenProxy] (${retry + 1}/${ZENPROXY_RETRIES})`);
+  if (reqLog) {
+    reqLog.proxiesTried.add('ZenProxy');
+    reqLog.retryCount = retry;
+  }
 
   try {
     const result = await proxyViaRelay(path, method, headers, body);
     if (result.status >= 400 && retry + 1 < ZENPROXY_RETRIES) {
       console.log(`[ZenProxy] 状态码 ${result.status}，重试`);
-      return dispatchZenProxy(path, method, headers, body, retry + 1);
+      return dispatchZenProxy(path, method, headers, body, retry + 1, reqLog);
+    }
+    if (reqLog) {
+      reqLog.finalProxy = 'ZenProxy';
+      reqLog.finalStatus = result.status;
     }
     return result;
   } catch (e: any) {
     console.error(`[ZenProxy] 错误: ${e.message}`);
     if (retry + 1 < ZENPROXY_RETRIES) {
-      return dispatchZenProxy(path, method, headers, body, retry + 1);
+      return dispatchZenProxy(path, method, headers, body, retry + 1, reqLog);
     }
     return new Response(JSON.stringify({ error: `ZenProxy失败: ${e.message}` }), {
       status: 502,
@@ -618,6 +672,17 @@ Bun.serve({
     const pathname = normalize(raw);
     console.log(`[>] ${method} ${raw}`);
 
+    // 创建请求日志
+    const reqLog: RequestLog = {
+      path: raw,
+      method,
+      startTime: Date.now(),
+      retryCount: 0,
+      proxiesTried: new Set<string>(),
+      finalProxy: null,
+      finalStatus: null,
+    };
+
     if (!pathname) {
       if (raw === '/' || raw === '/v1') {
         return new Response(
@@ -628,11 +693,10 @@ Bun.serve({
       return new Response('{"error":"not found"}', { status: 404, headers: { 'content-type': 'application/json' } });
     }
 
+    let response: Response;
     if (pathname === '/v1/models' && method === 'GET') {
-      return dispatch(pathname + search, 'GET', collectHeaders(req));
-    }
-
-    if ((pathname === '/v1/chat/completions' || pathname === '/v1/messages') && method === 'POST') {
+      response = await dispatch(pathname + search, 'GET', collectHeaders(req), undefined, 0, new Set<string>(), reqLog);
+    } else if ((pathname === '/v1/chat/completions' || pathname === '/v1/messages') && method === 'POST') {
       let body = await req.text();
       const h = collectHeaders(req);
       const isStream =
@@ -645,10 +709,20 @@ Bun.serve({
           if (!json.stream) { json.stream = true; body = JSON.stringify(json); }
         } catch {}
       }
-      return dispatch(pathname, 'POST', h, body);
+      response = await dispatch(pathname, 'POST', h, body, 0, new Set<string>(), reqLog);
+    } else {
+      return new Response('{"error":"not found"}', { status: 404, headers: { 'content-type': 'application/json' } });
     }
 
-    return new Response('{"error":"not found"}', { status: 404, headers: { 'content-type': 'application/json' } });
+    // 记录请求完成日志
+    const elapsed = Date.now() - reqLog.startTime;
+    const status = reqLog.finalStatus || response.status;
+    const proxyCount = reqLog.proxiesTried.size;
+    const finalProxy = reqLog.finalProxy || 'unknown';
+    const resultStr = status >= 200 && status < 400 ? '完成' : '失败';
+    console.log(`[${resultStr}] ${method} ${raw} | 状态:${status} | 重试:${reqLog.retryCount} | 代理IP:${proxyCount} | 耗时:${elapsed}ms | 代理:${finalProxy}`);
+
+    return response;
   },
 });
 

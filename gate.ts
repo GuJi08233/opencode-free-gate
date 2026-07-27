@@ -43,6 +43,7 @@ const UPSTREAM = 'https://opencode.ai/zen';
 const PORT = parseInt(process.env.PORT || '13339');
 const TIMEOUT = 120000;
 const STREAM_TIMEOUT = 300000;
+const PROXY_FIRST_BYTE_TIMEOUT = parseInt(process.env.PROXY_FIRST_BYTE_TIMEOUT || '30000');  // 单次代理首字节超时（30s）
 const SLOT_COUNT = Math.max(3, Math.min(5, parseInt(process.env.SLOT_COUNT || '3')));
 const PROXY_PROBE_TIMEOUT = parseInt(process.env.PROXY_PROBE_TIMEOUT || '8000');
 const PROXY_REFRESH_MS = parseInt(process.env.PROXY_REFRESH_MS || '300000');
@@ -299,18 +300,21 @@ function doHttps(
   body: string | undefined, agent: https.Agent,
 ): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
+    const ctl = new AbortController();
+    const firstByteTimer = setTimeout(() => ctl.abort(new Error('首字节超时')), PROXY_FIRST_BYTE_TIMEOUT);
     const req = https.request(
       `${UPSTREAM}${path}`,
-      { method, headers, agent, timeout: TIMEOUT, rejectUnauthorized: false },
+      { method, headers, agent, timeout: TIMEOUT, rejectUnauthorized: false, signal: ctl.signal },
       (res) => {
+        clearTimeout(firstByteTimer);
         const chunks: Buffer[] = [];
         res.on('data', (c: Buffer) => chunks.push(c));
         res.on('end', () => resolve({ status: res.statusCode || 200, body: Buffer.concat(chunks).toString('utf-8') }));
         res.on('error', reject);
       },
     );
-    req.on('error', reject);
-    req.on('timeout', () => req.destroy(new Error('超时')));
+    req.on('error', (e) => { clearTimeout(firstByteTimer); reject(e); });
+    req.on('timeout', () => { clearTimeout(firstByteTimer); req.destroy(new Error('超时')); });
     if (body) req.write(body);
     req.end();
   });
@@ -321,10 +325,13 @@ function doHttpsStream(
   body: string | undefined, agent: https.Agent,
 ): Promise<{ status: number; stream: ReadableStream<Uint8Array> }> {
   return new Promise((resolve, reject) => {
+    const ctl = new AbortController();
+    const firstByteTimer = setTimeout(() => ctl.abort(new Error('首字节超时')), PROXY_FIRST_BYTE_TIMEOUT);
     const req = https.request(
       `${UPSTREAM}${path}`,
-      { method, headers, agent, timeout: STREAM_TIMEOUT, rejectUnauthorized: false },
+      { method, headers, agent, timeout: STREAM_TIMEOUT, rejectUnauthorized: false, signal: ctl.signal },
       (res) => {
+        clearTimeout(firstByteTimer);  // 收到响应头，取消首字节超时
         res.on('end', () => { try { agent.destroy(); } catch {} });
         res.on('error', () => { try { agent.destroy(); } catch {} });
         const stream = new ReadableStream<Uint8Array>({
@@ -338,7 +345,7 @@ function doHttpsStream(
         resolve({ status: res.statusCode || 200, stream });
       },
     );
-    req.on('error', reject);
+    req.on('error', (e) => { clearTimeout(firstByteTimer); reject(e); });
     if (body) req.write(body);
     req.end();
   });

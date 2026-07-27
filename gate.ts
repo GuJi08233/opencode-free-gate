@@ -448,29 +448,28 @@ async function dispatchAuto(
 //  dispatch（custom 模式）
 // ––––––––––––––––––––––––––––––––––––––––––––––––––––
 
-/** custom 模式：仅使用自定义代理 → ZenProxy */
+/** custom 模式：仅使用自定义代理 → ZenProxy（自定义代理不标记失败，失败后重试同一个） */
 async function dispatchCustom(
   path: string, method: string, headers: Record<string, string>,
-  body: string | undefined, retry = 0, triedAddrs = new Set<string>(),
+  body: string | undefined, retry = 0,
 ): Promise<Response> {
   if (FORCE_RELAY) {
     if (ZENPROXY_KEY) return proxyViaRelay(path, method, headers, body);
     return new Response('{"error":"FORCE_RELAY 但未配置 ZENPROXY_KEY"}', { status: 502, headers: { 'content-type': 'application/json' } });
   }
 
-  const available = customSlots.filter((s) => !triedAddrs.has(s.addr));
-  const slot = available[rrCursor % available.length] || available[0] || null;
-  rrCursor++;
-
-  if (!slot) {
+  if (customSlots.length === 0) {
     if (ZENPROXY_KEY) {
-      console.log(`[回退] 自定义代理失败 → ZenProxy relay`);
+      console.log(`[回退] 无自定义代理 → ZenProxy relay`);
       return proxyViaRelay(path, method, headers, body);
     }
     return new Response('{"error":"没有可用代理"}', { status: 502, headers: { 'content-type': 'application/json' } });
   }
 
-  triedAddrs.add(slot.addr);
+  // 轮询选择代理，但不标记失败
+  const slot = customSlots[rrCursor % customSlots.length];
+  rrCursor = (rrCursor + 1) % customSlots.length;
+
   console.log(`[取] ${slot.addr} (retry=${retry})`);
 
   const isStream = (headers['accept'] || '').includes('event-stream');
@@ -481,17 +480,16 @@ async function dispatchCustom(
       const { status: s, stream } = await doHttpsStream(path, method, headers, body, agent);
       if (s >= 400) {
         try { agent.destroy(); } catch {}
-        if (s === 429) console.log(`[429] ${slot.addr} 被限流，换IP重试(流式)`);
-        else console.log(`[错码] ${slot.addr} 状态码 ${s}，换IP重试(流式)`);
-        dropCustomSlot(slot.addr);
+        if (s === 429) console.log(`[429] ${slot.addr} 被限流，重试(流式)`);
+        else console.log(`[错码] ${slot.addr} 状态码 ${s}，重试(流式)`);
         if (retry < MAX_RETRIES) {
-          return dispatchCustom(path, method, headers, body, retry + 1, triedAddrs);
+          return dispatchCustom(path, method, headers, body, retry + 1);
         }
         if (ZENPROXY_KEY) {
           console.log(`[回退] 重试耗尽 → ZenProxy relay`);
           return proxyViaRelay(path, method, headers, body);
         }
-        return new Response(JSON.stringify({ error: `所有代理失败: 状态码 ${s}` }), {
+        return new Response(JSON.stringify({ error: `代理失败: 状态码 ${s}` }), {
           status: 502,
           headers: { 'content-type': 'application/json' },
         });
@@ -506,11 +504,10 @@ async function dispatchCustom(
     try { agent.destroy(); } catch {}
 
     if (status >= 400) {
-      if (status === 429) console.log(`[429] ${slot.addr} 被限流，换IP重试`);
-      else console.log(`[错码] ${slot.addr} 状态码 ${status}，换IP重试`);
-      dropCustomSlot(slot.addr);
+      if (status === 429) console.log(`[429] ${slot.addr} 被限流，重试`);
+      else console.log(`[错码] ${slot.addr} 状态码 ${status}，重试`);
       if (retry < MAX_RETRIES) {
-        return dispatchCustom(path, method, headers, body, retry + 1, triedAddrs);
+        return dispatchCustom(path, method, headers, body, retry + 1);
       }
       if (ZENPROXY_KEY) {
         console.log(`[回退] 重试耗尽 → ZenProxy relay`);
@@ -524,16 +521,14 @@ async function dispatchCustom(
     console.error(`[错] ${slot.addr}: ${e.message}`);
     try { agent.destroy(); } catch {}
 
-    dropCustomSlot(slot.addr);
-
     if (retry < MAX_RETRIES) {
-      return dispatchCustom(path, method, headers, body, retry + 1, triedAddrs);
+      return dispatchCustom(path, method, headers, body, retry + 1);
     }
     if (ZENPROXY_KEY) {
       console.log(`[回退] 重试耗尽 → ZenProxy relay`);
       return proxyViaRelay(path, method, headers, body);
     }
-    return new Response(JSON.stringify({ error: `所有代理失败: ${e.message}` }), {
+    return new Response(JSON.stringify({ error: `代理失败: ${e.message}` }), {
       status: 502,
       headers: { 'content-type': 'application/json' },
     });
@@ -549,7 +544,7 @@ function dispatch(
   body: string | undefined, retry = 0, triedAddrs = new Set<string>(),
 ): Promise<Response> {
   if (PROXY_MODE === 'custom') {
-    return dispatchCustom(path, method, headers, body, retry, triedAddrs);
+    return dispatchCustom(path, method, headers, body, retry);
   }
   return dispatchAuto(path, method, headers, body, retry, triedAddrs);
 }

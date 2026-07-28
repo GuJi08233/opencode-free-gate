@@ -651,33 +651,63 @@ async function proxyViaRelay(
 }
 
 // ––––––––––––––––––––––––––––––––––––––––––––––––––––
-//  模型过滤与重定向
+//  模型过滤与重定向（实时获取，60秒缓存）
 // ––––––––––––––––––––––––––––––––––––––––––––––––––––
-
-// 上游 -free 模型 → 用户看到的模型名（去掉 -free 后缀）
-const MODEL_RENAME: Record<string, string> = {
-  'deepseek-v4-flash-free': 'deepseek-v4-flash',
-  'mimo-v2.5-free': 'mimo-v2.5',
-  'ling-3.0-flash-free': 'ling-3.0-flash',
-  'nemotron-3-ultra-free': 'nemotron-3-ultra',
-  'north-mini-code-free': 'north-mini-code',
-  'laguna-s-2.1-free': 'laguna-s-2.1',
-};
-
-// 反向映射：用户模型名 → 上游模型名（加回 -free）
-const MODEL_REDIRECT: Record<string, string> = Object.fromEntries(
-  Object.entries(MODEL_RENAME).map(([upstream, display]) => [display, upstream]),
-);
 
 // 额外直接放行的模型（不做重命名）
 const EXTRA_MODELS = ['big-pickle'];
 
-// 所有允许的用户模型名
-const ALLOWED_MODELS = new Set([...Object.keys(MODEL_REDIRECT), ...EXTRA_MODELS]);
+// 缓存
+let modelCache: { rename: Record<string, string>; redirect: Record<string, string>; ts: number } | null = null;
+const MODEL_CACHE_TTL = 60000;  // 60秒缓存
+
+/** 从上游实时获取免费模型列表，构建映射 */
+async function fetchModelMaps(): Promise<{ rename: Record<string, string>; redirect: Record<string, string> }> {
+  // 缓存未过期直接返回
+  if (modelCache && Date.now() - modelCache.ts < MODEL_CACHE_TTL) {
+    return modelCache;
+  }
+
+  try {
+    const res = await fetch(`${UPSTREAM}/v1/models`, {
+      headers: { accept: 'application/json', authorization: 'Bearer public' },
+      signal: AbortSignal.timeout(8000),
+    });
+    const data = await res.json();
+    const all: any[] = Array.isArray(data) ? data : data.data || [];
+
+    const rename: Record<string, string> = {};
+    for (const m of all) {
+      const id: string = m.id || m;
+      if (id.endsWith('-free')) {
+        // deepseek-v4-flash-free → deepseek-v4-flash
+        rename[id] = id.replace(/-free$/, '');
+      }
+    }
+
+    const redirect: Record<string, string> = {};
+    for (const [upstream, display] of Object.entries(rename)) {
+      redirect[display] = upstream;
+    }
+
+    modelCache = { rename, redirect, ts: Date.now() };
+    console.log(`[模型] 已刷新 ${Object.keys(rename).length} 个免费模型`);
+    return modelCache;
+  } catch (e: any) {
+    // 获取失败，返回缓存（如有）或空
+    if (modelCache) {
+      console.warn(`[模型] 刷新失败，使用缓存: ${e.message}`);
+      return modelCache;
+    }
+    console.warn(`[模型] 刷新失败且无缓存: ${e.message}`);
+    return { rename: {}, redirect: {} };
+  }
+}
 
 /** 拦截 GET /v1/models，返回过滤+重命名后的模型列表 */
-function handleModelsList(): Response {
-  const models = Object.values(MODEL_RENAME).concat(EXTRA_MODELS).sort().map((id) => ({
+async function handleModelsList(): Promise<Response> {
+  const { rename } = await fetchModelMaps();
+  const models = Object.values(rename).concat(EXTRA_MODELS).sort().map((id) => ({
     id,
     object: 'model',
     created: Math.floor(Date.now() / 1000),
@@ -689,12 +719,13 @@ function handleModelsList(): Response {
 }
 
 /** 将请求体中的模型名重定向为上游实际模型名 */
-function rewriteModel(body: string): string {
+async function rewriteModel(body: string): Promise<string> {
   try {
+    const { redirect } = await fetchModelMaps();
     const json = JSON.parse(body);
-    if (json.model && MODEL_REDIRECT[json.model]) {
+    if (json.model && redirect[json.model]) {
       const original = json.model;
-      json.model = MODEL_REDIRECT[original];
+      json.model = redirect[original];
       console.log(`[模型重定向] ${original} → ${json.model}`);
       return JSON.stringify(json);
     }
@@ -719,7 +750,7 @@ console.log(`[门] http://localhost:${PORT}`);
 console.log(`[门] OpenAI:    /openai/v1/chat/completions | /openai/v1/models`);
 console.log(`[门] Anthropic: /anthropic/v1/messages`);
 console.log(`[门] 模式:      ${PROXY_MODE}`);
-console.log(`[门] 模型:      ${Object.values(MODEL_RENAME).concat(EXTRA_MODELS).join(', ')}`);
+console.log(`[门] 模型:      实时获取（60秒缓存）+ big-pickle`);
 if (PROXY_MODE === 'auto') {
   console.log(`[门] 策略:      S级代理(${SLOT_COUNT}槽,重试${SLOT_RETRIES}次) → ${ZENPROXY_KEY ? `ZenProxy(${ZENPROXY_RETRIES}次) → ` : ''}自定义代理${CUSTOM_PROXIES ? `(${parseCustomProxies(CUSTOM_PROXIES).length}个,重试${CUSTOM_RETRIES || '按数量'}次)` : '(未配置)'}`);
 } else {
@@ -759,8 +790,8 @@ Bun.serve({
 
     let response: Response;
     if (pathname === '/v1/models' && method === 'GET') {
-      // 本地返回过滤+重命名后的模型列表，不走上游
-      response = handleModelsList();
+      // 本地返回过滤+重命名后的模型列表，实时获取上游
+      response = await handleModelsList();
     } else if ((pathname === '/v1/chat/completions' || pathname === '/v1/messages') && method === 'POST') {
       let body = await req.text();
       const h = collectHeaders(req);
@@ -775,7 +806,7 @@ Bun.serve({
         } catch {}
       }
       // 模型名重定向（deepseek-v4-flash → deepseek-v4-flash-free）
-      body = rewriteModel(body);
+      body = await rewriteModel(body);
       response = await dispatch(pathname, 'POST', h, body, 0, new Set<string>(), reqLog);
     } else {
       return new Response('{"error":"not found"}', { status: 404, headers: { 'content-type': 'application/json' } });

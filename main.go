@@ -76,7 +76,7 @@ func logStartup(cfg config) {
 		log.Printf("[门] 认证:      %s", state)
 	}
 	log.Printf("[门] 模式:      %s", cfg.proxyMode)
-	log.Printf("[门] 超时:      单次首字节 %s / 总预算 %s", cfg.firstByteTimeout, cfg.hardTimeout)
+	log.Printf("[门] 超时:      流式首字节 %s / 流式总预算 %s / 非流式最高 %s", cfg.firstByteTimeout, cfg.hardTimeout, cfg.nonStreamTimeout)
 	if cfg.proxyMode == "auto" {
 		log.Printf("[门] 策略:      S级代理(%d槽,重试%d次) -> ZenProxy(%d次) -> 自定义代理", cfg.slotCount, cfg.slotRetries, cfg.zenRetries)
 	} else {
@@ -202,6 +202,9 @@ func (a *app) handlePost(w http.ResponseWriter, r *http.Request, path string, de
 	}
 
 	stream := wantsStream(r.Header, body)
+	if !stream {
+		deadline = trace.start.Add(a.gateway.cfg.nonStreamTimeout)
+	}
 	if stream {
 		body = ensureStream(body)
 	}
@@ -211,12 +214,13 @@ func (a *app) handlePost(w http.ResponseWriter, r *http.Request, path string, de
 		cancel()
 	}
 	request := upstreamRequest{
-		method:   http.MethodPost,
-		path:     path,
-		headers:  a.collectHeaders(r.Header),
-		body:     body,
-		stream:   stream,
-		deadline: deadline,
+		method:    http.MethodPost,
+		path:      path,
+		headers:   a.collectHeaders(r.Header),
+		body:      body,
+		stream:    stream,
+		nonStream: !stream,
+		deadline:  deadline,
 	}
 	if stream {
 		request.headers.Set("Accept", "text/event-stream")

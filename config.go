@@ -24,6 +24,7 @@ type config struct {
 	gatewayKey       string
 	firstByteTimeout time.Duration
 	hardTimeout      time.Duration
+	nonStreamTimeout time.Duration
 	probeTimeout     time.Duration
 	refreshInterval  time.Duration
 	streamIdle       time.Duration
@@ -59,6 +60,7 @@ func loadConfig(project projectSpec) config {
 		gatewayKey:       os.Getenv("GATEWAY_KEY"),
 		firstByteTimeout: envMilliseconds("PROXY_FIRST_BYTE_TIMEOUT", 3000),
 		hardTimeout:      envMilliseconds("HARD_TIMEOUT", 10000),
+		nonStreamTimeout: envMilliseconds("NON_STREAM_TIMEOUT", 300000),
 		probeTimeout:     envMilliseconds("PROXY_PROBE_TIMEOUT", 8000),
 		refreshInterval:  envMilliseconds("PROXY_REFRESH_MS", 300000),
 		streamIdle:       300 * time.Second,

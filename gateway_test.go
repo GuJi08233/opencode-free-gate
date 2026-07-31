@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -36,7 +37,7 @@ func TestOpenHTTPTimeoutClosesProxyConnection(t *testing.T) {
 
 	proxyURL, _ := url.Parse("http://" + listener.Addr().String())
 	started := time.Now()
-	_, err = openHTTP(context.Background(), http.MethodGet, "https://example.invalid/v1/models", http.Header{}, nil, proxyURL, 100*time.Millisecond)
+	_, err = openHTTP(context.Background(), http.MethodGet, "https://example.invalid/v1/models", http.Header{}, nil, proxyURL, 100*time.Millisecond, 100*time.Millisecond, 100*time.Millisecond)
 	if !errors.Is(err, errAttemptTimeout) {
 		t.Fatalf("expected attempt timeout, got %v", err)
 	}
@@ -131,6 +132,92 @@ func TestBusinessBadRequestIsNotRetried(t *testing.T) {
 	}
 }
 
+func TestNonStreamIgnoresFirstByteTimeout(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(120 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	cfg := config{
+		project:          projectSpec{upstream: upstream.URL, directFallback: true},
+		proxyMode:        "custom",
+		firstByteTimeout: 30 * time.Millisecond,
+		hardTimeout:      60 * time.Millisecond,
+		nonStreamTimeout: 300 * time.Millisecond,
+	}
+	application := &app{gateway: newGateway(cfg)}
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"stream":false}`))
+	trace := newRequestTrace()
+
+	response, err := application.handlePost(httptest.NewRecorder(), request, "/v1/chat/completions", trace.start.Add(cfg.hardTimeout), trace)
+	if err != nil {
+		t.Fatalf("non-stream request should outlive the first-byte timeout: %v", err)
+	}
+	if response.status != http.StatusOK {
+		t.Fatalf("expected 200, got %d", response.status)
+	}
+}
+
+func TestStreamStillHonorsFirstByteTimeout(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-time.After(150 * time.Millisecond):
+			w.WriteHeader(http.StatusOK)
+		case <-r.Context().Done():
+		}
+	}))
+	defer upstream.Close()
+
+	cfg := config{
+		project:          projectSpec{upstream: upstream.URL, directFallback: true},
+		proxyMode:        "custom",
+		firstByteTimeout: 30 * time.Millisecond,
+		hardTimeout:      300 * time.Millisecond,
+		nonStreamTimeout: time.Second,
+	}
+	application := &app{gateway: newGateway(cfg)}
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"stream":true}`))
+	trace := newRequestTrace()
+
+	_, err := application.handlePost(httptest.NewRecorder(), request, "/v1/chat/completions", trace.start.Add(cfg.hardTimeout), trace)
+	if !errors.Is(err, errAttemptTimeout) {
+		t.Fatalf("expected stream first-byte timeout, got %v", err)
+	}
+}
+
+func TestNonStreamStopsAtConfiguredMaximum(t *testing.T) {
+	release := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		<-release
+	}))
+	defer func() {
+		close(release)
+		upstream.Close()
+	}()
+
+	cfg := config{
+		project:          projectSpec{upstream: upstream.URL, directFallback: true},
+		proxyMode:        "custom",
+		firstByteTimeout: 20 * time.Millisecond,
+		hardTimeout:      50 * time.Millisecond,
+		nonStreamTimeout: 120 * time.Millisecond,
+	}
+	application := &app{gateway: newGateway(cfg)}
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"stream":false}`))
+	trace := newRequestTrace()
+	started := time.Now()
+
+	_, err := application.handlePost(httptest.NewRecorder(), request, "/v1/chat/completions", trace.start.Add(cfg.hardTimeout), trace)
+	if !errors.Is(err, errRequestTimeout) {
+		t.Fatalf("expected non-stream total timeout, got %v", err)
+	}
+	if elapsed := time.Since(started); elapsed < 80*time.Millisecond || elapsed > time.Second {
+		t.Fatalf("unexpected non-stream timeout duration: %s", elapsed)
+	}
+}
+
 func TestRateLimitRetriesEveryLayerBeforeDirect(t *testing.T) {
 	var publicCalls atomic.Int32
 	publicSlots := make([]slot, 0, 5)
@@ -190,10 +277,11 @@ func TestRateLimitRetriesEveryLayerBeforeDirect(t *testing.T) {
 	trace := newRequestTrace()
 
 	response, err := gw.dispatch(context.Background(), upstreamRequest{
-		method:   http.MethodGet,
-		path:     "/v1/models",
-		headers:  http.Header{},
-		deadline: time.Now().Add(cfg.hardTimeout),
+		method:    http.MethodPost,
+		path:      "/v1/models",
+		headers:   http.Header{},
+		nonStream: true,
+		deadline:  time.Now().Add(cfg.hardTimeout),
 	}, trace)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

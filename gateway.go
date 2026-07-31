@@ -469,12 +469,13 @@ func (g *gateway) scheduleFill() {
 }
 
 type upstreamRequest struct {
-	method   string
-	path     string
-	headers  http.Header
-	body     []byte
-	stream   bool
-	deadline time.Time
+	method    string
+	path      string
+	headers   http.Header
+	body      []byte
+	stream    bool
+	nonStream bool
+	deadline  time.Time
 }
 
 type gatewayResponse struct {
@@ -533,12 +534,32 @@ func (r *liveResponse) readAll(deadline time.Time) ([]byte, error) {
 
 func (g *gateway) openUpstream(ctx context.Context, request upstreamRequest, proxyURL *url.URL, maxWait time.Duration) (*liveResponse, error) {
 	target := strings.TrimRight(g.cfg.project.upstream, "/") + request.path
-	return openHTTP(ctx, request.method, target, request.headers, request.body, proxyURL, boundedWait(request.deadline, maxWait))
+	wait, connectTimeout, responseHeaderTimeout := g.openTimeouts(request.deadline, maxWait)
+	return openHTTP(ctx, request.method, target, request.headers, request.body, proxyURL, wait, connectTimeout, responseHeaderTimeout)
 }
 
-func openHTTP(ctx context.Context, method, target string, headers http.Header, body []byte, proxyURL *url.URL, wait time.Duration) (*liveResponse, error) {
+func (g *gateway) openTimeouts(deadline time.Time, firstByteLimit time.Duration) (time.Duration, time.Duration, time.Duration) {
+	if firstByteLimit > 0 {
+		wait := boundedWait(deadline, firstByteLimit)
+		return wait, wait, wait
+	}
+	wait := boundedWait(deadline, 0)
+	connectTimeout := boundedWait(deadline, g.cfg.firstByteTimeout)
+	return wait, connectTimeout, 0
+}
+
+func openHTTP(ctx context.Context, method, target string, headers http.Header, body []byte, proxyURL *url.URL, wait, connectTimeout, responseHeaderTimeout time.Duration) (*liveResponse, error) {
 	if wait <= 0 {
 		return nil, errRequestTimeout
+	}
+	if connectTimeout <= 0 || connectTimeout > wait {
+		connectTimeout = wait
+	}
+	if responseHeaderTimeout < 0 {
+		responseHeaderTimeout = 0
+	}
+	if responseHeaderTimeout > wait {
+		responseHeaderTimeout = wait
 	}
 
 	attemptContext, cancel := context.WithCancel(ctx)
@@ -548,7 +569,7 @@ func openHTTP(ctx context.Context, method, target string, headers http.Header, b
 		cancel()
 	})
 
-	transport := requestTransport(proxyURL, wait)
+	transport := requestTransport(proxyURL, connectTimeout, responseHeaderTimeout)
 	client := &http.Client{
 		Transport: transport,
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
@@ -592,17 +613,17 @@ func openHTTP(ctx context.Context, method, target string, headers http.Header, b
 	return &liveResponse{response: res, cancel: cancel, transport: transport}, nil
 }
 
-func requestTransport(proxyURL *url.URL, timeout time.Duration) *http.Transport {
+func requestTransport(proxyURL *url.URL, connectTimeout, responseHeaderTimeout time.Duration) *http.Transport {
 	transport := &http.Transport{
 		DialContext: (&net.Dialer{
-			Timeout:   timeout,
+			Timeout:   connectTimeout,
 			KeepAlive: -1,
 		}).DialContext,
 		ForceAttemptHTTP2:      false,
 		DisableKeepAlives:      true,
 		DisableCompression:     true,
-		TLSHandshakeTimeout:    timeout,
-		ResponseHeaderTimeout:  timeout,
+		TLSHandshakeTimeout:    connectTimeout,
+		ResponseHeaderTimeout:  responseHeaderTimeout,
 		ExpectContinueTimeout:  time.Second,
 		MaxResponseHeaderBytes: 1 << 20,
 		TLSClientConfig: &tls.Config{
@@ -628,7 +649,11 @@ func boundedWait(deadline time.Time, maximum time.Duration) time.Duration {
 }
 
 func (g *gateway) perform(ctx context.Context, request upstreamRequest, proxyURL *url.URL) (*gatewayResponse, error) {
-	live, err := g.openUpstream(ctx, request, proxyURL, g.cfg.firstByteTimeout)
+	firstByteLimit := g.cfg.firstByteTimeout
+	if request.nonStream {
+		firstByteLimit = 0
+	}
+	live, err := g.openUpstream(ctx, request, proxyURL, firstByteLimit)
 	if err != nil {
 		if errors.Is(err, errAttemptTimeout) && time.Until(request.deadline) <= 0 {
 			return nil, errRequestTimeout
@@ -869,7 +894,12 @@ func (g *gateway) performRelay(ctx context.Context, request upstreamRequest) (*g
 	headers.Del("Host")
 	headers.Del("Content-Length")
 	headers.Del("Authorization")
-	live, err := openHTTP(ctx, http.MethodPost, relay.String(), headers, request.body, nil, boundedWait(request.deadline, g.cfg.firstByteTimeout))
+	firstByteLimit := g.cfg.firstByteTimeout
+	if request.nonStream {
+		firstByteLimit = 0
+	}
+	wait, connectTimeout, responseHeaderTimeout := g.openTimeouts(request.deadline, firstByteLimit)
+	live, err := openHTTP(ctx, http.MethodPost, relay.String(), headers, request.body, nil, wait, connectTimeout, responseHeaderTimeout)
 	if err != nil {
 		if errors.Is(err, errAttemptTimeout) && time.Until(request.deadline) <= 0 {
 			return nil, errRequestTimeout

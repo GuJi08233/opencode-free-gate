@@ -3,16 +3,12 @@ name: docker
 # ──────────────────────────────────────────────────────────────
 #  自动构建 Docker 镜像并发布到 GitHub Container Registry
 #  触发：
-#    - push 到 main → 重建 latest + sha
 #    - push 标签 v* → 重建 vX.Y.Z + latest
-#    - 手动 workflow_dispatch → 调试用
 # ──────────────────────────────────────────────────────────────
 
 on:
   push:
-    branches: ['main']
     tags: ['v*']
-  workflow_dispatch:
 
 # 避免并发构建互相覆盖
 concurrency:

@@ -19,8 +19,8 @@ services:
       # 候选池刷新间隔（ms，5 分钟）
       # - PROXY_REFRESH_MS=300000
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:13339/openai/v1/models"]
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:13339/healthz"]
       interval: 30s
-      timeout: 10s
+      timeout: 3s
       retries: 3
       start_period: 10s

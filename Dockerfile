@@ -1,55 +1,41 @@
 # syntax=docker/dockerfile:1.7
-# ──────────────────────────────────────────────────────────────
-#  opencode-free-gate — 多阶段 Docker 构建
-#  输出镜像约 80MB（基于 oven/bun:alpine）
-# ──────────────────────────────────────────────────────────────
 
-# ── 阶段 1: 安装依赖 ────────────────────────────────────────
-FROM oven/bun:1.3.14-alpine AS deps
+FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS build
 
-WORKDIR /app
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
 
-# 单独 COPY package.json 让这一层被缓存（依赖不变就不重装）
-COPY package.json ./
-# bun.lock 不存在时 --frozen-lockfile 会失败，所以用普通 install
-# 第一次构建会生成 bun.lock，后续可以改用 bun install --frozen-lockfile
-RUN bun install --production
+WORKDIR /src
 
-# ── 阶段 2: 运行时镜像 ──────────────────────────────────────
-FROM oven/bun:1.3.14-alpine AS runtime
+COPY go.mod ./
+COPY *.go ./
 
-# OCI 标签
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+    go build -buildvcs=false -trimpath -ldflags="-s -w" -o /out/gate .
+
+FROM alpine:3.22 AS runtime
+
 LABEL org.opencontainers.image.title="opencode-free-gate" \
-      org.opencontainers.image.description="opencode.ai/zen 免费模型的反代网关" \
+      org.opencontainers.image.description="opencode.ai/zen 免费模型的 Go 反代网关" \
       org.opencontainers.image.source="https://github.com/GuJi08233/opencode-free-gate" \
       org.opencontainers.image.licenses="MIT"
 
-# 安装 wget（健康检查用）
-RUN apk add --no-cache wget tini
-
-# 创建非 root 用户
-RUN addgroup -S app && adduser -S app -G app
+RUN apk add --no-cache ca-certificates tzdata wget tini \
+    && addgroup -S app \
+    && adduser -S app -G app
 
 WORKDIR /app
-
-# 从 deps 阶段复制依赖和代码
-COPY --from=deps /app/node_modules ./node_modules
-COPY --chown=app:app gate.ts ./
-COPY --chown=app:app package.json ./
+COPY --from=build --chown=app:app /out/gate /app/gate
 
 USER app
 
-# 默认端口
-ENV PORT=13339 \
-    NODE_ENV=production
+ENV PORT=13339
 
 EXPOSE 13339
 
-# 健康检查：拉一次模型列表（10s 内必须有响应）
-HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
-  CMD wget --quiet --tries=1 --spider \
-      "http://127.0.0.1:${PORT}/openai/v1/models" || exit 1
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+  CMD wget --quiet --tries=1 --spider "http://127.0.0.1:${PORT}/healthz" || exit 1
 
-# tini 负责收割僵尸进程，PID 1 信号处理
 ENTRYPOINT ["/sbin/tini", "--"]
-CMD ["bun", "run", "gate.ts"]
+CMD ["/app/gate"]

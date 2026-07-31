@@ -10,6 +10,7 @@ name: docker
 
 on:
   push:
+    branches: ['main']
     tags: ['v*']
   workflow_dispatch:
 
@@ -33,6 +34,15 @@ jobs:
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
+
+      - name: 设置 Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: 运行测试
+        run: go test ./...
 
       - name: 设置 QEMU（多架构）
         uses: docker/setup-qemu-action@v3

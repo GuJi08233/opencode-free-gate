@@ -736,7 +736,7 @@ async function rewriteModel(body: string): Promise<string> {
 // ––––––––––––––––––––––––––––––––––––––––––––––––––––
 
 function normalize(raw: string): string | null {
-  const m = raw.match(/^\/(openai|anthropic)(\/v1\/.+)$/);
+  const m = raw.match(/^\/(openai|anthropic|codex)(\/v1\/.+)$/);
   return m ? m[2] : null;
 }
 
@@ -747,6 +747,7 @@ function normalize(raw: string): string | null {
 console.log(`[门] http://localhost:${PORT}`);
 console.log(`[门] OpenAI:    /openai/v1/chat/completions | /openai/v1/models`);
 console.log(`[门] Anthropic: /anthropic/v1/messages`);
+console.log(`[门] Codex:     /codex/v1/responses`);
 console.log(`[门] 模式:      ${PROXY_MODE}`);
 console.log(`[门] 模型:      实时获取（60秒缓存）+ big-pickle`);
 if (PROXY_MODE === 'auto') {
@@ -790,7 +791,7 @@ Bun.serve({
     if (pathname === '/v1/models' && method === 'GET') {
       // 本地返回过滤+重命名后的模型列表，实时获取上游
       response = await handleModelsList();
-    } else if ((pathname === '/v1/chat/completions' || pathname === '/v1/messages') && method === 'POST') {
+    } else if ((pathname === '/v1/chat/completions' || pathname === '/v1/messages' || pathname === '/v1/responses') && method === 'POST') {
       let body = await req.text();
       const h = collectHeaders(req);
       const isStream =

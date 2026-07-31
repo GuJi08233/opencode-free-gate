@@ -31,4 +31,7 @@ func TestOpenCodeRoutesAndHeaders(t *testing.T) {
 	if got := headers.Get("X-Opencode-Client"); got != "desktop" {
 		t.Fatalf("client header was not preserved: %q", got)
 	}
+	if !project.directFallback {
+		t.Fatal("OpenCode must try one direct request after proxy retries are exhausted")
+	}
 }

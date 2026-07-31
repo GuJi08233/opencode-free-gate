@@ -59,7 +59,7 @@ func currentProject() projectSpec {
 		},
 		upstreamAuthorization: "Bearer public",
 		defaultClientHeader:   "cli",
-		directFallback:        false,
+		directFallback:        true,
 		modelMode:             modelOpenCode,
 		ownedBy:               "opencode",
 		extraModels:           []string{"big-pickle"},

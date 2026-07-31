@@ -48,14 +48,14 @@ docker run -d \
 | 变量 | 默认值 | 说明 |
 |---|---:|---|
 | `PORT` | `13339` | HTTP 监听端口 |
-| `PROXY_MODE` | `auto` | `auto` 使用公共代理池；`custom` 仅使用自定义代理链 |
-| `SLOT_COUNT` | `3` | 公共代理槽位数，限制为 3–5 |
+| `PROXY_MODE` | `auto` | `auto` 使用完整回退链；`custom` 从自定义代理开始 |
+| `SLOT_COUNT` | `5` | 公共代理槽位数，限制为 3–5；并发请求从不同槽位轮询开始 |
 | `SLOT_RETRIES` | 槽位数 | 单请求最多尝试的公共代理数 |
 | `CUSTOM_PROXIES` | 空 | 逗号分隔的代理 URL，支持 HTTP、HTTPS、SOCKS5/SOCKS5H |
-| `CUSTOM_RETRIES` | `0` | 自定义代理重试数；`0` 表示按代理数量轮询一轮 |
+| `CUSTOM_RETRIES` | `10` | 自定义代理重试数；`0` 表示按代理数量轮询一轮 |
 | `ZENPROXY_RELAY` | `https://zenproxy.top/api/relay` | ZenProxy relay 地址 |
 | `ZENPROXY_KEY` | 空 | ZenProxy API key；为空时跳过该层 |
-| `ZENPROXY_RETRIES` | `1` | ZenProxy 尝试次数 |
+| `ZENPROXY_RETRIES` | `5` | ZenProxy 尝试次数 |
 | `FORCE_RELAY` | `0` | `1` 表示强制只走 ZenProxy |
 | `PROXY_PROBE_TIMEOUT` | `8000` | 代理探活超时，毫秒 |
 | `PROXY_REFRESH_MS` | `300000` | 公共候选池刷新间隔，毫秒 |
@@ -68,7 +68,9 @@ docker run -d \
 ## 重试规则
 
 - 网络错误、连接/握手/首字节超时：关闭当前连接并切换代理。
-- `401`、`403`、`408`、`425`、`429`、`5xx`：视为可能与代理 IP 或临时上游状态有关，允许重试。
+- `401`、`403`、`408`、`425`、`429`、`5xx`：立即切换下一次尝试，不等待退避。
+- 默认顺序为公共代理 5 次、ZenProxy 5 次、自定义代理 10 次，最后直连 1 次。
+- 代理层返回的 `429` 不会提前返回客户端；完成全部代理重试后，最终直连仍为 `429` 时才原样返回。
 - 其他 `4xx`：视为业务请求错误，立即返回客户端。
 - 总预算耗尽：返回 `504`，并取消仍在进行的底层请求。
 

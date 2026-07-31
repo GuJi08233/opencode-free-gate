@@ -35,7 +35,7 @@ func loadConfig(project projectSpec) config {
 		mode = "auto"
 	}
 
-	slotCount := envInt("SLOT_COUNT", 3)
+	slotCount := envInt("SLOT_COUNT", 5)
 	if slotCount < 3 {
 		slotCount = 3
 	}
@@ -50,8 +50,8 @@ func loadConfig(project projectSpec) config {
 		proxyMode:        mode,
 		slotCount:        slotCount,
 		slotRetries:      nonNegative(envInt("SLOT_RETRIES", slotCount)),
-		customRetries:    nonNegative(envInt("CUSTOM_RETRIES", 0)),
-		zenRetries:       nonNegative(envInt("ZENPROXY_RETRIES", 1)),
+		customRetries:    nonNegative(envInt("CUSTOM_RETRIES", 10)),
+		zenRetries:       nonNegative(envInt("ZENPROXY_RETRIES", 5)),
 		customProxies:    os.Getenv("CUSTOM_PROXIES"),
 		zenRelay:         envString("ZENPROXY_RELAY", "https://zenproxy.top/api/relay"),
 		zenKey:           os.Getenv("ZENPROXY_KEY"),

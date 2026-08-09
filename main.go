@@ -77,11 +77,21 @@ func logStartup(cfg config) {
 	}
 	log.Printf("[门] 模式:      %s", cfg.proxyMode)
 	log.Printf("[门] 超时:      流式首字节 %s / 流式总预算 %s / 非流式最高 %s", cfg.firstByteTimeout, cfg.hardTimeout, cfg.nonStreamTimeout)
-	if cfg.proxyMode == "auto" {
-		log.Printf("[门] 策略:      S级代理(%d槽,重试%d次) -> ZenProxy(%d次) -> 自定义代理", cfg.slotCount, cfg.slotRetries, cfg.zenRetries)
-	} else {
-		log.Printf("[门] 策略:      自定义代理 -> ZenProxy(%d次)", cfg.zenRetries)
+	layers := make([]string, 0, 4)
+	for _, layer := range cfg.orderedLayers() {
+		switch layer {
+		case layerPublic:
+			layers = append(layers, fmt.Sprintf("S级代理(%d槽,重试%d次)", cfg.slotCount, cfg.slotRetries))
+		case layerZen:
+			layers = append(layers, fmt.Sprintf("ZenProxy(%d次)", cfg.zenRetries))
+		case layerCustom:
+			layers = append(layers, "自定义代理")
+		}
 	}
+	if cfg.project.directFallback {
+		layers = append(layers, "直连")
+	}
+	log.Printf("[门] 策略:      %s", strings.Join(layers, " -> "))
 }
 
 func (a *app) ServeHTTP(w http.ResponseWriter, r *http.Request) {

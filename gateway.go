@@ -81,7 +81,7 @@ func newGateway(cfg config) *gateway {
 func (g *gateway) start(ctx context.Context) {
 	g.rootContext = ctx
 	go func() {
-		if g.cfg.proxyMode == "auto" {
+		if g.cfg.usesPublicPool() {
 			if err := g.loadCandidates(ctx); err != nil {
 				log.Printf("[选] load failed: %v", err)
 			}
@@ -95,7 +95,7 @@ func (g *gateway) start(ctx context.Context) {
 		log.Printf("[门] 预热完成")
 	}()
 
-	if g.cfg.proxyMode == "auto" {
+	if g.cfg.usesPublicPool() {
 		go func() {
 			ticker := time.NewTicker(g.cfg.refreshInterval)
 			defer ticker.Stop()
@@ -679,13 +679,52 @@ func (g *gateway) dispatch(ctx context.Context, request upstreamRequest, trace *
 		}
 		return g.dispatchZen(ctx, request, trace)
 	}
-	if g.cfg.proxyMode == "custom" {
-		return g.dispatchCustomMode(ctx, request, trace)
+
+	var last *gatewayResponse
+	for _, layer := range g.cfg.orderedLayers() {
+		var response *gatewayResponse
+		var err error
+		switch layer {
+		case layerPublic:
+			response, err = g.dispatchPublicLayer(ctx, request, trace)
+		case layerZen:
+			if g.cfg.zenKey == "" {
+				continue
+			}
+			response, err = g.dispatchZen(ctx, request, trace)
+		case layerCustom:
+			if g.customCount() == 0 {
+				continue
+			}
+			response, err = g.dispatchCustomLayer(ctx, request, trace)
+		default:
+			continue
+		}
+		if err != nil {
+			if isTerminalContextError(ctx, err) {
+				return nil, err
+			}
+			if !errors.Is(err, errNoProxy) {
+				log.Printf("[层错] %s: %v", layer, err)
+			}
+			continue
+		}
+		if !retryableStatus(response.status) {
+			return response, nil
+		}
+		last = response
 	}
-	return g.dispatchAutoMode(ctx, request, trace)
+
+	if g.cfg.project.directFallback {
+		return g.dispatchDirect(ctx, request, trace)
+	}
+	if last != nil {
+		return last, nil
+	}
+	return nil, errNoProxy
 }
 
-func (g *gateway) dispatchAutoMode(ctx context.Context, request upstreamRequest, trace *requestTrace) (*gatewayResponse, error) {
+func (g *gateway) dispatchPublicLayer(ctx context.Context, request upstreamRequest, trace *requestTrace) (*gatewayResponse, error) {
 	if g.slotCount() == 0 {
 		fillContext, cancel := context.WithDeadline(ctx, request.deadline)
 		_ = g.fillSlots(fillContext)
@@ -724,81 +763,8 @@ func (g *gateway) dispatchAutoMode(ctx context.Context, request upstreamRequest,
 		last = response
 		lastProxy = candidate.addr
 	}
-
-	if g.cfg.zenKey != "" {
-		log.Printf("[回退] S级代理 -> ZenProxy")
-		response, err := g.dispatchZen(ctx, request, trace)
-		if err != nil {
-			if isTerminalContextError(ctx, err) {
-				return nil, err
-			}
-			log.Printf("[ZenProxy] 错误: %v", err)
-		} else if !retryableStatus(response.status) {
-			return response, nil
-		} else {
-			last = response
-		}
-	}
-
-	if g.customCount() > 0 {
-		response, err := g.dispatchCustomLayer(ctx, request, trace)
-		if err != nil {
-			if isTerminalContextError(ctx, err) {
-				return nil, err
-			}
-		} else if !retryableStatus(response.status) {
-			return response, nil
-		} else {
-			last = response
-		}
-	}
-
-	if g.cfg.project.directFallback {
-		response, err := g.dispatchDirect(ctx, request, trace)
-		if err != nil {
-			return nil, err
-		}
-		return response, nil
-	}
 	if last != nil {
-		if trace.finalProxy == "" {
-			trace.finalProxy = lastProxy
-		}
-		return last, nil
-	}
-	return nil, errNoProxy
-}
-
-func (g *gateway) dispatchCustomMode(ctx context.Context, request upstreamRequest, trace *requestTrace) (*gatewayResponse, error) {
-	var last *gatewayResponse
-	if g.customCount() > 0 {
-		response, err := g.dispatchCustomLayer(ctx, request, trace)
-		if err != nil {
-			if isTerminalContextError(ctx, err) {
-				return nil, err
-			}
-		} else if !retryableStatus(response.status) {
-			return response, nil
-		} else {
-			last = response
-		}
-	}
-	if g.cfg.zenKey != "" {
-		response, err := g.dispatchZen(ctx, request, trace)
-		if err != nil {
-			if isTerminalContextError(ctx, err) {
-				return nil, err
-			}
-		} else if !retryableStatus(response.status) {
-			return response, nil
-		} else {
-			last = response
-		}
-	}
-	if g.cfg.project.directFallback {
-		return g.dispatchDirect(ctx, request, trace)
-	}
-	if last != nil {
+		trace.finalProxy = lastProxy
 		return last, nil
 	}
 	return nil, errNoProxy

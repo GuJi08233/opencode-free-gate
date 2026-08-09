@@ -306,6 +306,91 @@ func TestRateLimitRetriesEveryLayerBeforeDirect(t *testing.T) {
 	}
 }
 
+func TestDispatchFollowsConfiguredOrder(t *testing.T) {
+	var mu sync.Mutex
+	var sequence []string
+	record := func(name string) {
+		mu.Lock()
+		sequence = append(sequence, name)
+		mu.Unlock()
+	}
+
+	public := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		record("public")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer public.Close()
+	publicURL, err := url.Parse(public.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	zen := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		record("zen")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer zen.Close()
+
+	custom := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		record("custom")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer custom.Close()
+	customURL, err := url.Parse(custom.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		record("direct")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	cfg := config{
+		project:          projectSpec{upstream: upstream.URL, directFallback: true},
+		proxyMode:        "auto",
+		proxyOrder:       []string{layerCustom, layerZen, layerPublic},
+		slotCount:        1,
+		slotRetries:      1,
+		customRetries:    1,
+		zenRetries:       1,
+		zenRelay:         zen.URL,
+		zenKey:           "test-key",
+		firstByteTimeout: time.Second,
+		hardTimeout:      10 * time.Second,
+	}
+	gw := newGateway(cfg)
+	gw.slots = []slot{{addr: publicURL.Host, proxyURL: publicURL}}
+	gw.custom = []slot{{addr: customURL.Host, proxyURL: customURL}}
+
+	response, err := gw.dispatch(context.Background(), upstreamRequest{
+		method:    http.MethodPost,
+		path:      "/v1/models",
+		headers:   http.Header{},
+		nonStream: true,
+		deadline:  time.Now().Add(cfg.hardTimeout),
+	}, newRequestTrace())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if response.status != http.StatusOK {
+		t.Fatalf("expected direct 200, got %d", response.status)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	want := []string{"custom", "zen", "public", "direct"}
+	if len(sequence) != len(want) {
+		t.Fatalf("expected sequence %v, got %v", want, sequence)
+	}
+	for i := range want {
+		if sequence[i] != want[i] {
+			t.Fatalf("expected sequence %v, got %v", want, sequence)
+		}
+	}
+}
+
 func TestConcurrentPublicSlotSelectionRoundRobins(t *testing.T) {
 	gw := newGateway(config{})
 	addresses := []string{"proxy-1", "proxy-2", "proxy-3", "proxy-4", "proxy-5"}

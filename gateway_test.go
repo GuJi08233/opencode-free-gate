@@ -408,7 +408,7 @@ func TestConcurrentPublicSlotSelectionRoundRobins(t *testing.T) {
 		go func() {
 			defer workers.Done()
 			<-start
-			selected, ok := gw.nextSlot(false, nil)
+			selected, ok := gw.nextSlot(false, nil, "", 0)
 			if !ok {
 				t.Error("expected a public proxy slot")
 				return

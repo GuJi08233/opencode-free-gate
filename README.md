@@ -10,6 +10,9 @@
 - 流式请求在成功取得响应头后可继续传输；客户端断开或流长时间无数据时自动清理连接。
 - 普通业务 `400/404/422` 直接返回，不再无意义地轮换代理。
 - 支持公共 S 级代理、自定义代理和 ZenProxy relay 多级回退，回退顺序可通过 `PROXY_ORDER` 自定义。
+- 上游请求携带完整 OpenCode 客户端头：真实 `User-Agent`、`x-opencode-client`、稳定会话哈希 `x-opencode-session`、每请求唯一 `x-opencode-request`（同一请求的代理重试保持不变）与 `x-opencode-project`。
+- `/v1/messages` 与真实 OpenCode 客户端一致，使用 `x-api-key` 认证并自动补齐 `anthropic-version`。
+- 同一会话优先固定同一代理出口（rendezvous 哈希亲和），减少匿名通道按出口 IP 限流带来的抖动；出口故障时自动回退到其他槽位。
 - 保留原有 Docker 镜像名、端口、路由和环境变量。
 
 ## API 路由
@@ -22,6 +25,15 @@
 | 健康检查 | `/healthz` |
 
 模型列表每 60 秒从 OpenCode 上游刷新一次，仅展示 `-free` 模型，并额外保留 `big-pickle`。请求中的展示名称会自动改回上游模型名称。
+
+## 会话 ID
+
+网关为每个上游请求生成 OpenCode 协议要求的标识头，客户端无需自行构造：
+
+- 优先使用客户端提供的 `x-opencode-session`、`x-session-id`、`conversation-id`、请求体 `conversation_id` 或 `metadata.session_id` 派生会话 ID。
+- 没有显式会话标识时，使用第一条用户消息（Responses 请求使用 `input` 或 `previous_response_id`）生成稳定会话哈希，同一段多轮对话始终映射到同一会话与同一代理出口。
+- 两个独立会话的第一条消息完全相同时，建议客户端发送不同的 `x-session-id` 以严格分离。
+- `x-opencode-request` 每个客户端请求重新生成，同一请求内的代理重试保持不变。
 
 ## Docker 部署
 

@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -410,7 +412,10 @@ func (g *gateway) slotAddresses(custom bool) []string {
 	return result
 }
 
-func (g *gateway) nextSlot(custom bool, tried map[string]struct{}) (slot, bool) {
+// nextSlot 选取下一个代理槽位。session 非空时使用 rendezvous 哈希，
+// 让同一会话在槽位存活期间固定同一出口（匿名通道按出口 IP 限流），
+// 槽位增删只影响映射到该槽位的会话；session 为空时保持轮询行为。
+func (g *gateway) nextSlot(custom bool, tried map[string]struct{}, session string, attempt int) (slot, bool) {
 	g.mu.RLock()
 	source := g.slots
 	if custom {
@@ -419,6 +424,21 @@ func (g *gateway) nextSlot(custom bool, tried map[string]struct{}) (slot, bool) 
 	snapshot := append([]slot(nil), source...)
 	g.mu.RUnlock()
 	if len(snapshot) == 0 {
+		return slot{}, false
+	}
+
+	if session != "" {
+		sort.SliceStable(snapshot, func(i, j int) bool {
+			return rendezvousScore(session, snapshot[i].addr) > rendezvousScore(session, snapshot[j].addr)
+		})
+		if custom {
+			return snapshot[attempt%len(snapshot)], true
+		}
+		for _, candidate := range snapshot {
+			if _, exists := tried[candidate.addr]; !exists {
+				return candidate, true
+			}
+		}
 		return slot{}, false
 	}
 
@@ -433,6 +453,11 @@ func (g *gateway) nextSlot(custom bool, tried map[string]struct{}) (slot, bool) 
 		}
 	}
 	return slot{}, false
+}
+
+func rendezvousScore(session, addr string) uint64 {
+	sum := sha256.Sum256([]byte(session + "\x00" + addr))
+	return binary.BigEndian.Uint64(sum[:8])
 }
 
 func (g *gateway) dropSlot(address string) {
@@ -475,6 +500,7 @@ type upstreamRequest struct {
 	body      []byte
 	stream    bool
 	nonStream bool
+	session   string
 	deadline  time.Time
 }
 
@@ -738,7 +764,7 @@ func (g *gateway) dispatchPublicLayer(ctx context.Context, request upstreamReque
 		if err := requestBudgetError(ctx, request.deadline); err != nil {
 			return nil, err
 		}
-		candidate, ok := g.nextSlot(false, tried)
+		candidate, ok := g.nextSlot(false, tried, request.session, retry)
 		if !ok {
 			break
 		}
@@ -781,7 +807,7 @@ func (g *gateway) dispatchCustomLayer(ctx context.Context, request upstreamReque
 		if err := requestBudgetError(ctx, request.deadline); err != nil {
 			return nil, err
 		}
-		candidate, ok := g.nextSlot(true, nil)
+		candidate, ok := g.nextSlot(true, nil, request.session, retry)
 		if !ok {
 			break
 		}

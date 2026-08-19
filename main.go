@@ -211,31 +211,62 @@ func (a *app) handlePost(w http.ResponseWriter, r *http.Request, path string, de
 		return jsonGatewayResponse(http.StatusBadRequest, "读取请求体失败"), nil
 	}
 
-	stream := wantsStream(r.Header, body)
+	payload := parseJSONObject(body)
+	ids := deriveRequestIDs(r.Header, payload)
+	stream := wantsStream(r.Header, payload)
 	if !stream {
 		deadline = trace.start.Add(a.gateway.cfg.nonStreamTimeout)
 	}
 	if stream {
-		body = ensureStream(body)
+		body = ensureStream(body, payload)
 	}
 	if a.gateway.cfg.project.modelMode != modelPassthrough {
 		modelContext, cancel := context.WithDeadline(r.Context(), deadline)
 		body = a.gateway.rewriteModel(modelContext, body)
 		cancel()
 	}
+	headers := a.collectHeaders(r.Header)
+	applyRequestIDs(headers, ids)
+	if strings.HasPrefix(path, "/v1/messages") {
+		applyAnthropicAuth(headers)
+	}
+	if headers.Get("Accept") == "" {
+		headers.Set("Accept", "application/json, text/event-stream")
+	}
 	request := upstreamRequest{
 		method:    http.MethodPost,
 		path:      path,
-		headers:   a.collectHeaders(r.Header),
+		headers:   headers,
 		body:      body,
 		stream:    stream,
 		nonStream: !stream,
+		session:   ids.Session,
 		deadline:  deadline,
 	}
 	if stream {
 		request.headers.Set("Accept", "text/event-stream")
 	}
 	return a.gateway.dispatch(r.Context(), request, trace)
+}
+
+// applyRequestIDs 用网关派生的标识覆盖发往上游的 OpenCode 头。
+func applyRequestIDs(headers http.Header, ids requestIDs) {
+	headers.Set("X-Opencode-Session", ids.Session)
+	headers.Set("X-Opencode-Request", ids.Request)
+	headers.Set("X-Opencode-Project", ids.Project)
+}
+
+// applyAnthropicAuth 让 /v1/messages 与真实 OpenCode 客户端一致：
+// 使用 x-api-key 而非 Authorization Bearer，并补齐默认 anthropic-version。
+func applyAnthropicAuth(headers http.Header) {
+	token := strings.TrimPrefix(headers.Get("Authorization"), "Bearer ")
+	headers.Del("Authorization")
+	if token != "" {
+		headers.Set("X-Api-Key", token)
+	}
+	if headers.Get("Anthropic-Version") == "" {
+		headers.Set("Anthropic-Version", "2023-06-01")
+	}
 }
 
 func (a *app) collectHeaders(source http.Header) http.Header {
@@ -251,30 +282,34 @@ func (a *app) collectHeaders(source http.Header) http.Header {
 	if auth := a.gateway.cfg.project.upstreamAuthorization; auth != "" {
 		result.Set("Authorization", auth)
 	}
-	if client := a.gateway.cfg.project.defaultClientHeader; client != "" && result.Get("X-Opencode-Client") == "" {
+	if client := a.gateway.cfg.project.defaultClientHeader; client != "" {
 		result.Set("X-Opencode-Client", client)
 	}
+	result.Set("User-Agent", opencodeUserAgent())
 	if result.Get("Content-Type") == "" {
 		result.Set("Content-Type", "application/json")
 	}
 	return result
 }
 
-func wantsStream(headers http.Header, body []byte) bool {
+func parseJSONObject(body []byte) map[string]any {
+	var payload map[string]any
+	if json.Unmarshal(body, &payload) != nil {
+		return nil
+	}
+	return payload
+}
+
+func wantsStream(headers http.Header, payload map[string]any) bool {
 	if strings.Contains(strings.ToLower(headers.Get("Accept")), "event-stream") {
 		return true
 	}
-	var payload map[string]any
-	if json.Unmarshal(body, &payload) == nil {
-		stream, _ := payload["stream"].(bool)
-		return stream
-	}
-	return false
+	stream, _ := payload["stream"].(bool)
+	return stream
 }
 
-func ensureStream(body []byte) []byte {
-	var payload map[string]any
-	if json.Unmarshal(body, &payload) != nil {
+func ensureStream(body []byte, payload map[string]any) []byte {
+	if payload == nil {
 		return body
 	}
 	if stream, _ := payload["stream"].(bool); stream {
